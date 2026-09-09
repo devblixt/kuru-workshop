@@ -1,4 +1,5 @@
 import {recoverAuthorizationAddress} from 'viem/utils';
+import {ownerTransaction,ownerReadback} from './owner-jobs.ts';
 import {randomUUID} from 'node:crypto';
 import {createWalletClient,http,keccak256,parseEther,encodeFunctionData,type Hex,type Address} from 'viem';
 import {privateKeyToAccount} from 'viem/accounts';
@@ -22,7 +23,7 @@ async function capDemos(){
    const amountIn=(remaining<c.tradeCap?remaining:c.tradeCap)+10010000n;
    if(BigInt(a.balances[3])<amountIn)throw new Error('The cap demo needs '+(Number(amountIn)/1e6).toFixed(2)+' available USDC. Deposit more faucet USDC first; this simulation spends nothing.');
    const plan={accountId:Number(a.id),version:a.policy.version,authNonce:BigInt(a.authNonce),nonce:BigInt(a.nonce),deadline:BigInt(Math.min(Math.floor(Date.now()/1000)+30,Number(c.expiry))),trades:[{marketIndex:0,isBuy:true,amountIn,minAmountOut:1n}]};
-   const signature=await manager.signTypedData({domain:domain(a.executor),types:planTypes,primaryType:'Plan',message:plan});
+   const signature=await manager.signTypedData({domain:domain(a.executor,a.signatureVersion),types:planTypes,primaryType:'Plan',message:plan});
    let rejected=false;try{await rpc.simulateContract({address:a.executor,abi:policyAbi,functionName:'executeRebalance',args:[plan,signature],account:relayer});}catch(e){if(String(e).includes('BudgetExceeded'))rejected=true;else throw e;}
    if(!rejected)throw new Error('Cap was not reached by this fill; no transaction was submitted');
    event(db,address,'simulation','Verified: the policy rejected the simulated trade with BudgetExceeded. Your balances and daily usage are unchanged.');
@@ -41,8 +42,17 @@ async function reconcile(){
    await wallet.sendRawTransaction({serializedTransaction:row.raw}).catch(()=>{});return false;
   }
   const finalized=await rpc.getBlock({blockTag:'finalized'});if(finalized.number<receipt.blockNumber)return false;
-  if(receipt.status==='reverted'&&JSON.parse(row.plan).kind!=='delegation'){db.prepare("UPDATE transactions SET status='reverted',error='Onchain revert' WHERE hash=?").run(row.hash);event(db,row.address,'reverted','Relayer transaction reverted. Refresh policy usage: another relayer may have executed the same signed intent.',row.hash);continue;}
   const plan=JSON.parse(row.plan);
+  if(receipt.status==='reverted'&&plan.kind==='owner'){
+   db.prepare("UPDATE owner_jobs SET status='failed',error='Onchain action reverted' WHERE id=?").run(plan.jobId);
+  }
+  if(receipt.status==='reverted'&&plan.kind!=='delegation'){db.prepare("UPDATE transactions SET status='reverted',error='Onchain revert' WHERE hash=?").run(row.hash);event(db,row.address,'reverted','Relayer transaction reverted. Refresh policy usage: another relayer may have executed the same signed intent.',row.hash);continue;}
+  if(plan.kind==='owner'){
+   const result=await ownerReadback(row.address,plan.request,receipt);
+   db.prepare("UPDATE owner_jobs SET status='confirmed',result=?,error=NULL WHERE id=?").run(stringify(result),plan.jobId);
+   db.prepare("UPDATE transactions SET status='confirmed',error=NULL WHERE hash=?").run(row.hash);
+   event(db,row.address,'owner',result.message,row.hash);continue;
+  }
   if(plan.kind==='delegation'){
    const code=await rpc.getCode({address:plan.mera,blockNumber:receipt.blockNumber});
    const ok=code?.toLowerCase()===('0xef0100'+config.mera.slice(2)).toLowerCase();
@@ -75,7 +85,7 @@ async function execute(session:Session,s:Snapshot,d:Decision){
  const plan={accountId:Number(a.id),version:a.policy.version,authNonce:BigInt(a.authNonce),nonce:BigInt(a.nonce),deadline,trades};
  // eth_call authenticates the manager signature, so signing precedes the complete simulation;
  // no transaction is submitted unless simulation and a final session check succeed.
- const signature=await manager.signTypedData({domain:domain(a.executor),types:planTypes,primaryType:'Plan',message:plan});
+ const signature=await manager.signTypedData({domain:domain(a.executor,a.signatureVersion),types:planTypes,primaryType:'Plan',message:plan});
  const {request}=await rpc.simulateContract({address:a.executor,abi:policyAbi,functionName:'executeRebalance',args:[plan,signature],account:relayer});
  const fresh=db.prepare("SELECT profile FROM sessions WHERE id=? AND status='active' AND expires>?").get(session.id,Date.now()) as {profile:string}|undefined;
  if(!fresh||fresh.profile!==session.profile)return;
@@ -113,6 +123,25 @@ async function delegations(){
   }catch(e){db.prepare("UPDATE delegations SET status='failed',error=? WHERE id=? AND status='queued'").run(asError(e),job.id);}
  }
 }
+async function ownerJobs(){
+ const jobs=db.prepare("SELECT * FROM owner_jobs WHERE status='queued' ORDER BY created LIMIT 1").all() as any[];
+ for(const job of jobs){
+  try{
+   if(Date.now()-job.created>300000)throw new Error('Action expired; sign again');
+   const prepared=await ownerTransaction(job.address,JSON.parse(job.request));
+   await rpc.call({account:relayer.address,to:prepared.to,data:prepared.data});
+   const tx=await wallet.prepareTransactionRequest({to:prepared.to,data:prepared.data});
+   if((tx.gas||0n)*(tx.maxFeePerGas||tx.gasPrice||0n)>parseEther('0.3'))throw new Error('Owner action exceeds 0.3 MON gas budget');
+   const raw=await wallet.signTransaction(tx),hash=keccak256(raw);
+   if(!lease(db,'worker',owner,180000))throw new Error('Worker lease lost');
+   db.exec('BEGIN IMMEDIATE');try{
+    db.prepare('INSERT INTO transactions(hash,address,session_id,nonce,raw,plan,status,created) VALUES(?,?,?,?,?,?,?,?)').run(hash,job.address,'owner:'+job.id,tx.nonce,raw,stringify({kind:'owner',jobId:job.id,request:prepared.request}),'pending',Date.now());
+    db.prepare("UPDATE owner_jobs SET status='pending',hash=? WHERE id=?").run(hash,job.id);db.exec('COMMIT');
+   }catch(e){db.exec('ROLLBACK');throw e;}
+   await wallet.sendRawTransaction({serializedTransaction:raw}).catch(()=>{});
+  }catch(e){db.prepare("UPDATE owner_jobs SET status='failed',error=? WHERE id=? AND status='queued'").run(asError(e),job.id);event(db,job.address,'failed',asError(e));}
+ }
+}
 async function cycle(){
  if(!lease(db,'worker',owner,180000))return;
  const heartbeat=setInterval(()=>lease(db,'worker',owner,180000),15000);
@@ -121,6 +150,7 @@ async function cycle(){
   await verifyDeployment();state(db,'deployment',{ok:true});
   const balance=await rpc.getBalance({address:relayer.address});state(db,'relayer',{ok:balance>parseEther('0.1'),address:relayer.address,balance});
   if(!await reconcile())return;
+  await ownerJobs();if(!await reconcile())return;
   await delegations();if(!await reconcile())return;
   await capDemos();
   db.prepare("UPDATE sessions SET status='expired' WHERE status='active' AND expires<=?").run(Date.now());

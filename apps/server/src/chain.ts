@@ -1,5 +1,6 @@
 import {createPublicClient,http,custom,zeroAddress,keccak256,stringToHex,toHex,type Address,type Hex} from 'viem';
 import {chain,deployment,coreAbi,bookAbi} from '../../../packages/shared/manifest.ts';
+import {gaslessAbi} from '../../../packages/shared/gaslessAbi.ts';
 import {meraAbi} from '../../../packages/shared/meraAbi.ts';
 import {policyAbi} from '../../../packages/shared/policyAbi.ts';
 import {config} from './config.ts';
@@ -38,8 +39,9 @@ export async function verifyDeployment(){
  if(config.mera!==zeroAddress){
   const code=await rpc.getCode({address:config.mera});if(!code||!config.meraCodeHash||keccak256(code)!==config.meraCodeHash)throw new Error('Mera implementation runtime mismatch');
   const [core,legacy]=await rpc.multicall({multicallAddress,allowFailure:false,contracts:[{address:config.mera,abi:meraAbi,functionName:'core'},{address:config.mera,abi:meraAbi,functionName:'legacy'}]});
-  if(core.toLowerCase()!==deployment.core.toLowerCase()||legacy.toLowerCase()!==config.policy.toLowerCase())throw new Error('Mera deployment mismatch');
+  if(core.toLowerCase()!==deployment.core.toLowerCase()||legacy.toLowerCase()!==(config.meraPrevious!==zeroAddress?config.meraPrevious:config.policy).toLowerCase())throw new Error('Mera deployment mismatch');
  }
+ if(config.gasless!==zeroAddress){const code=await rpc.getCode({address:config.gasless});if(!code||!config.gaslessCodeHash||keccak256(code)!==config.gaslessCodeHash)throw new Error('Gasless router runtime mismatch');}
  lastVerified=Date.now();
 }
 export async function snapshot():Promise<Snapshot>{
@@ -66,20 +68,28 @@ export async function accountState(address:Address,atBlock?:bigint,selectedPolic
  ] as any}) as any[];
  const id=String(values[0]),balances=values.slice(1,5).map(String),authNonce=String(values[5]);
  let authorized=!!values[6],executor=config.policy,policyAddress=config.policy;
- if(config.mera!==zeroAddress&&id!=='0'&&selectedPolicy!==config.policy){
-  const signer=await rpc.readContract({address:config.mera,abi:meraAbi,functionName:'signerForAccount',args:[Number(id)],blockNumber});
+ const candidates=selectedPolicy?[selectedPolicy]:[config.mera,config.meraPrevious].filter(p=>p!==zeroAddress);
+ for(const candidate of candidates){
+  if(candidate===config.policy||id==='0')break;
+  const signer=await rpc.readContract({address:candidate,abi:meraAbi,functionName:'signerForAccount',args:[Number(id)],blockNumber});
   if(signer!==zeroAddress){
-   executor=signer;policyAddress=config.mera;
+   executor=signer;policyAddress=candidate;
    const allowed=await rpc.readContract({address:deployment.core,abi:coreAbi,functionName:'isAuthorizedAccountSigner',args:[address,signer,1],blockNumber});
    const code=await rpc.getCode({address:signer,blockNumber});
-   authorized=allowed&&!values[6]&&code?.toLowerCase()===('0xef0100'+config.mera.slice(2)).toLowerCase();
+   authorized=allowed&&!values[6]&&code?.toLowerCase()===('0xef0100'+candidate.slice(2)).toLowerCase();
+   if(candidate===config.mera&&config.meraPrevious!==zeroAddress){
+    const previous=await rpc.readContract({address:config.meraPrevious,abi:meraAbi,functionName:'signerForAccount',args:[Number(id)],blockNumber});
+    if(previous!==zeroAddress&&previous.toLowerCase()!==signer.toLowerCase()&&await rpc.readContract({address:deployment.core,abi:coreAbi,functionName:'isAuthorizedAccountSigner',args:[address,previous,1],blockNumber}))authorized=false;
+   }
+   break;
   }
  }
- if(config.policy===zeroAddress||id==='0')return {id,executor,policyAddress,mode:policyAddress===config.mera?'mera':'legacy',block:String(blockNumber),balances,policy:null,usage:null,nonce:'0',authorized,authNonce};
+ const signatureVersion=policyAddress===config.mera&&config.gasless!==zeroAddress?'2':'1';
+ if(config.policy===zeroAddress||id==='0')return {id,executor,policyAddress,signatureVersion,mode:policyAddress!==config.policy?'mera':'legacy',block:String(blockNumber),balances,policy:null,usage:null,nonce:'0',authorized,authNonce};
  const [policy,usage,nonce]=await rpc.multicall({multicallAddress,blockNumber,allowFailure:false,contracts:[
   {address:policyAddress,abi:policyAbi,functionName:'getPolicy',args:[Number(id)]},
   {address:policyAddress,abi:policyAbi,functionName:'getUsage',args:[Number(id)]},
   {address:policyAddress,abi:policyAbi,functionName:'nonces',args:[Number(id)]},
  ]});
- return {id,executor,policyAddress,mode:policyAddress===config.mera?'mera':'legacy',block:String(blockNumber),balances,policy,usage,nonce:String(nonce),authorized,authNonce};
+ return {id,executor,policyAddress,signatureVersion,mode:policyAddress!==config.policy?'mera':'legacy',block:String(blockNumber),balances,policy,usage,nonce:String(nonce),authorized,authNonce};
 }

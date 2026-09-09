@@ -18,3 +18,18 @@ Known external integration issue at publication: some live Kuru order-book respo
 - Autonomous Mera receipt: `0xa8a2183e11c185192fff871674239788db72f027540f9f2a7419570c5fd35430`. Mera signer `0xC871616A25C449530F0db3D9BbBEF919b136B467`; AccountCore account 14. Daily usage carried over from the legacy policy and reached approximately 249.99 USDC, rather than resetting on migration.
 - Physical authenticator compatibility is not established by the virtual-authenticator test. A new 25-wallet live Mera rehearsal was not run; existing admission/persistence tests cover 25 sessions, and the live Mera acceptance used dedicated test accounts.
 - The previously documented hosted Gateway price-schema mismatch remains outside this migration. Onchain execution and balance reads use direct RPC; no successful hosted quote is fabricated.
+
+## Fully gasless flow — September 9, 2026
+
+54 Solidity tests and 18 TypeScript tests pass, plus the production frontend build. The contract suites cover legacy and V2 accounting, sponsored policy authorization, replay/expiry/configuration tampering, funding cooldown and atomic withdrawal rollback if revocation fails.
+
+A fresh browser wallet completed funding, Mera delegation, signed configuration, TRADE authorization, an autonomous rebalance, over-cap simulation, pause, revocation and withdrawal. Its MON balance and Ethereum transaction nonce remained zero throughout; the injected test wallet rejected participant transaction methods, and none were attempted. It made eight root-wallet signatures, including three for withdrawal. Mera used the actual SDK with Chrome's virtual PRF authenticator; physical authenticator compatibility was not tested.
+
+- Root: `0xbA3F4E2c3a726A00bf0231b70621DE02c2Eca9d1`, AccountCore ID 41.
+- MeraPortfolioV2: `0x97e191fe4dc5df2fc559340df8dcf0e6ea311afa`.
+- WorkshopGasless: `0xe319ad749e8d6877d3dbc83e759d2f169c3696a5`, initially funded with 7,500 existing test USDC.
+- Funding receipt: `0x46a9a00300d0f80f1bb8113024b02b6112771c680e137230d2884c6c4071cad0` credited 250 USDC directly to AccountCore.
+- Rebalance receipt: `0xbf70a4b41d19c4ad0a037d4941d5a73561946d1a5cd26a0a3f70f7d2c891d6cf`.
+- Withdrawal receipt: `0xaed540ae06e300c9126458790c0e46537428131c66b5a1124ad136c50dc77791` returned exactly 70.014098 USDC to the root wallet, independently checked against its ERC20 balance increase and the AccountCore debit.
+
+The test deliberately used a 180-USDC daily buy cap so enough cash remained to demonstrate an over-cap rejection after trading. Final state: policy paused, Mera TRADE revoked, helper WITHDRAW revoked, no browser errors. This was a dedicated live flow, not a new 25-wallet live gasless load rehearsal.

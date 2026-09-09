@@ -16,6 +16,8 @@ export function openStore(path=config.db){
  CREATE TABLE IF NOT EXISTS leases(name TEXT PRIMARY KEY,owner TEXT NOT NULL,expires INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS transactions(hash TEXT PRIMARY KEY,address TEXT NOT NULL,session_id TEXT NOT NULL,nonce INTEGER NOT NULL,raw TEXT NOT NULL,plan TEXT NOT NULL,status TEXT NOT NULL,created INTEGER NOT NULL,error TEXT);
  CREATE TABLE IF NOT EXISTS delegations(id TEXT PRIMARY KEY,address TEXT NOT NULL,mera TEXT NOT NULL,authorization TEXT NOT NULL,status TEXT NOT NULL,hash TEXT,error TEXT,created INTEGER NOT NULL);
+ CREATE TABLE IF NOT EXISTS owner_jobs(id TEXT PRIMARY KEY,address TEXT NOT NULL,request TEXT NOT NULL,status TEXT NOT NULL,hash TEXT,error TEXT,result TEXT,created INTEGER NOT NULL);
+ CREATE UNIQUE INDEX IF NOT EXISTS pending_owner_job ON owner_jobs(address) WHERE status IN ('queued','pending');
  CREATE UNIQUE INDEX IF NOT EXISTS pending_delegation ON delegations(address) WHERE status IN ('queued','pending');
  `);
  if(!(db.prepare('PRAGMA table_info(sessions)').all() as any[]).some(c=>c.name==='executor'))db.exec("ALTER TABLE sessions ADD COLUMN executor TEXT NOT NULL DEFAULT ''");

@@ -10,6 +10,8 @@ import {getAddress,isAddress,zeroAddress,type Address,type Hex} from 'viem';
 import {createSiweMessage} from 'viem/siwe';
 import {z} from 'zod';
 import {createKuruData} from './kuru-data.ts';
+import {ownerTransaction} from './owner-jobs.ts';
+import {ownerRequestSchema} from '../../../packages/shared/gasless.ts';
 import {config} from './config.ts';
 import {rpc,accountState} from './chain.ts';
 import {openStore,atomic,event,getState,newSession,type Session} from './db.ts';
@@ -52,7 +54,7 @@ export async function createApi(db=openStore(),kuruData=createKuruData()){
  });
  app.get('/api/markets',async(_req,reply)=>{try{return await kuruData.markets();}catch{return reply.code(503).send({error:'Kuru market API unavailable. Retry shortly.'});}});
  app.get('/api/trades',async(req,reply)=>{const address=await user(req,reply);if(!address)return;const a=await cachedAccount(address);if(a.id==='0')return {source:'kuru-data-source',fetchedAt:Date.now(),feedEpoch:null,userSeq:null,hasMore:false,trades:[]};try{const result=await kuruData.trades(a.id);return {...result,trades:result.trades.map(t=>({...t,managerExecution:!!db.prepare("SELECT hash FROM transactions WHERE address=? AND hash=? AND status='confirmed'").get(address,t.hash)}))};}catch{return reply.code(503).send({error:'Kuru trade history unavailable. Retry shortly.'});}});
- app.get('/api/config',async()=>({deployment,policy:config.policy,meraImplementation:config.mera,manager:config.manager,chainId:chain.id,initialWeights,origin:config.origin}));
+ app.get('/api/config',async()=>({deployment,policy:config.policy,meraImplementation:config.mera,meraPrevious:config.meraPrevious,gasless:config.gasless,manager:config.manager,chainId:chain.id,initialWeights,origin:config.origin}));
  app.get('/api/health',async()=>({deployment:getState(db,'deployment'),worker:getState(db,'worker'),market:getState(db,'market'),model:getState(db,'model'),relayer:getState(db,'relayer'),queue:db.prepare("SELECT COUNT(*) n, MIN(created) oldestCreated FROM transactions WHERE status='pending'").get(),configured:config.policy!==zeroAddress,hostedData:kuruData.status()}));
  app.post('/api/auth/challenge',{config:{rateLimit:{max:10,timeWindow:60000}}},async(req,reply)=>{
   const body=z.object({address:z.string()}).parse(req.body);
@@ -85,7 +87,19 @@ export async function createApi(db=openStore(),kuruData=createKuruData()){
   let cursor=0;const push=()=>{const rows=db.prepare('SELECT * FROM events WHERE address=? AND id>? ORDER BY id LIMIT 60').all(address,cursor) as any[];for(const row of rows){reply.raw.write(`id: ${row.id}\ndata: ${JSON.stringify(row)}\n\n`);cursor=row.id;}reply.raw.write(': heartbeat\n\n');};
   push();const timer=setInterval(()=>{if(!siteSession(req)){clearInterval(timer);reply.raw.end();return;}push();},5000);req.raw.on('close',()=>clearInterval(timer));
  });
- app.post('/api/mera/delegation',{config:{rateLimit:{max:5,timeWindow:60000}}},async(req,reply)=>{
+ app.post('/api/owner/actions',{config:{rateLimit:{max:30,timeWindow:60000}}},async(req,reply)=>{
+  const address=await user(req,reply);if(!address)return;
+  const input=ownerRequestSchema.parse(req.body);
+  await ownerTransaction(address,input);
+  const id=atomic(db,()=>{
+   const existing=db.prepare("SELECT id,request FROM owner_jobs WHERE address=? AND status IN ('queued','pending')").get(address) as any;
+   if(existing){if(existing.request===stringify(input))return existing.id;throw new Error('Wait for your pending gasless action to finish');}
+   if((db.prepare('SELECT COUNT(*) n FROM owner_jobs WHERE address=? AND created>?').get(address,Date.now()-86400000) as any).n>=100)throw new Error('Daily sponsored-action limit reached');
+   const id=randomUUID();db.prepare("INSERT INTO owner_jobs(id,address,request,status,created) VALUES(?,?,?,'queued',?)").run(id,address,stringify(input),Date.now());return id;
+  });return {id};
+ });
+ app.get('/api/owner/actions/:id',async(req,reply)=>{const address=await user(req,reply);if(!address)return;const {id}=req.params as {id:string};const row=db.prepare('SELECT id,status,hash,error,result FROM owner_jobs WHERE id=? AND address=?').get(id,address) as any;if(!row)return reply.code(404).send({error:'Action not found'});if(row.status==='confirmed')accountCache.delete(address);return {...row,result:row.result?JSON.parse(row.result):null};});
+ app.post('/api/mera/delegation' ,{config:{rateLimit:{max:5,timeWindow:60000}}},async(req,reply)=>{
   const address=await user(req,reply);if(!address)return;
   if(config.mera===zeroAddress)throw new Error('Mera deployment is not configured');
   const b=z.object({mera:z.string().regex(/^0x[0-9a-fA-F]{40}$/),authorization:z.object({address:z.string().regex(/^0x[0-9a-fA-F]{40}$/),chainId:z.literal(chain.id),nonce:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),yParity:z.union([z.literal(0),z.literal(1)]),r:z.string().regex(/^0x[0-9a-fA-F]{64}$/),s:z.string().regex(/^0x[0-9a-fA-F]{64}$/)})}).parse(req.body);

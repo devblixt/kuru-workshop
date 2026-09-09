@@ -1,58 +1,40 @@
-# Facilitator runbook
+# Facilitator runbook — 45–60 minutes
 
-## Before attendees arrive
+## Before admission
 
-Run the full preflight and confirm at least 7,500 USDC of depth on each side of every basket market inside the displayed band. Verify Codex produces valid decisions inside 20 seconds, sufficient relayer MON, empty pending transaction queue, correct HTTPS, and the website login. Keep the operator view private.
+Run preflight and confirm at least 7,500 USDC of depth on each side of each basket market inside the approved bands. Check relayer MON, the workshop faucet reserve, an empty pending transaction queue, correct HTTPS/login and valid model decisions within 20 seconds. Keep operator keys and credentials private.
 
-Ask participants to bring a browser wallet on Monad testnet, chain 10143, with native test MON. The Kuru token faucet supplies 10,000 USDC, 1 WETH, 0.1 cbBTC and 1 XAUt0 per address every 12 hours; it does not supply MON. Do not direct participants to production token addresses.
+Participants bring a browser wallet and a WebAuthn PRF-capable passkey authenticator. **They do not need native MON.** All available UI actions are sponsored; their wallets sign messages and typed approvals. The funding button deposits 250 test USDC directly into AccountCore. This is a workshop grant with a 12-hour cooldown.
 
-Distribute the `starter` branch and the operator-selected website login. Require Node 24+, `npm ci`, and `.env.example`. The hosted app remains available if a laptop cannot run the starter.
+## Run of show
 
-## 45 minutes
+| Time | Activity |
+|---|---|
+| 0–5 | Show the example app, assets, account balances and a completed rebalance |
+| 5–12 | Explain AccountCore custody, Mera delegation, signed policies and the relayer |
+| 12–20 | Connect and verify wallets; request the gasless USDC grant |
+| 20–35 | Trace the API and contract calls in the example source; configure and authorize a session |
+| 35–42 | Observe execution, simulate an over-budget trade, pause and revoke |
+| 42–45 | Discuss project ideas and changes participants could build |
+| Optional 15 | Change a basket objective or inspect signed withdrawal execution |
 
-| Minute | Facilitator action | Participant outcome |
-|---|---|---|
-| 0–5 | Show a funded account, trade receipt and pause/revoke controls | Understand the product |
-| 5–12 | Draw owner → policy → Kuru, with separate manager and relayer | Distinguish custody, permission and gas |
-| 12–20 | Connect, sign in, claim, approve exactly 250 USDC and deposit | Fund their AccountCore account |
-| 20–35 | Complete the three SDK exercises; review caps and authorize | Enable a bounded session |
-| 35–42 | Observe allocation and receipts; try the cap guard; stop and revoke | Verify execution and revocation |
-| 42–45 | Explain extension ideas and limitations | Choose a hackathon direction |
+The repository is a complete example application. Use its source to explain each building block; no starter branch or TODO exercise is required.
 
-For 60 minutes, add 15 minutes to modify a basket objective and discuss calendar rebalancing, better valuation or alternative interfaces.
+## Calls to explain
 
-## Exercise checkpoints
+- Funding: authenticated request → workshop grant → `depositForAccount`.
+- Identity: SIWE challenge, nonce, wallet signature and secure cookie.
+- Mera: passkey PRF derivation → signed 7702 authorization → sponsored installation.
+- Limits: owner-signed configuration → `executeOwnerAction`.
+- Permissions: AccountCore `authorizeAccountSignerBySig` and `revokeAccountSignerBySig`.
+- Trading: shared AI targets → deterministic per-account planner → manager signature → simulation → Mera EOA → Kuru swap.
+- Recovery: signed bytes persisted before broadcasting; finalized receipt and independent state read-back.
+- Withdrawal: amount signature, temporary helper permission and revocation bundled atomically; proceeds go only to the root account.
 
-1. **SDK client:** connect the public/wallet client to the canonical AccountCore.
-2. **Read:** obtain an available USDC balance and read the ETH market's best bid/ask. Convert price ticks with the manifest's price precision. Inspect market parameters as an extension.
-3. **Permission:** authorize the policy address with `permissions: 1` and the configured expiry. Grant no other permissions.
+## Demonstrations and troubleshooting
 
-Each checkpoint has an implementation on `solution`. The policy contract and signing infrastructure are prebuilt so the exercise fits the slot.
+Run the cap simulation before the first rebalance while sufficient USDC is available, or set a lower daily buy cap such as 180 USDC so enough cash remains after trading to demonstrate an over-budget rejection. The simulation never broadcasts. Do not fake liquidity or completed trades.
 
-## Demonstrations
+If passkey setup is unavailable, check authenticator PRF support and the site hostname. If signatures expire, refresh state and sign again; do not reuse stale authorization nonces. If a submitted action is uncertain, wait for journal reconciliation rather than requesting another transaction. The faucet cooldown is independent of the public Kuru faucet. Existing wallet USDC is not used by the grant button.
 
-- Explain why an agent's promise to respect a cap differs from the contract checking actual fills.
-- Show that 250 USDC deposited into a root account is not a segregated subaccount. Point out other available assets and owner activity.
-- Try the cap guard while sufficient USDC is available, preferably before the first rebalance. The worker signs and simulates an oversized trade but never submits it. If available cash is below the required demonstration amount, deposit more faucet USDC or use the facilitator account.
-- Point out `BudgetExceeded`, the unchanged balances, and the unchanged daily usage. A revert for insufficient funds or empty liquidity is not a successful cap demonstration.
-- Stop the worker, confirm the onchain pause, then revoke TRADE. A transaction already submitted can settle before the pause lands.
-- Refresh or close the tab during a session: the backend remains responsible for the schedule and the onchain expiry remains the final bound.
-
-## Troubleshooting
-
-- **Faucet cooldown:** display the next claim time; use already claimed funds. Do not create wallets just to evade the cooldown.
-- **No trades:** inspect liquidity, price bands, minimum notional, drift and remaining caps. Holding is a legitimate outcome.
-- **Waiting on model:** timeout/quota failures skip the cycle. Do not present a canned decision as live AI output.
-- **No place available:** admission is capped at 25 wallets. The operator can reset admission between cohorts after confirming all sessions have ended.
-- **Configuration expired during wallet prompts:** configure a new policy and reauthorize. Daily usage remains.
-- **Pending transaction:** inspect the persisted hash; do not send a fresh-nonce duplicate.
-
-Extension ideas: recurring cash allocation, transparent manager comparisons, a user-owned subaccount, independent reference pricing, or an eligibility-aware RWA interface. They are separate projects, not capabilities claimed by this demo.
-
-## Participant development server
-
-After the hosted deployment passes preflight, participants put `WORKSHOP_API_PROXY=https://your-workshop.example` in their local `.env` and run `npm run dev`. Open **http://localhost:5173** (use localhost for the development browser's secure-cookie exception). The Vite development proxy forwards `/api` to the supplied workshop backend; the owner still signs every wallet operation locally. Log in through the website form with the credentials supplied by the facilitator. Participants do not run the transaction worker, copy server authentication storage or receive manager keys. The proxy's Origin rewrite is development-only and explicitly enabled by this setting. If the browser refuses the secure cookie on localhost, use the hosted app for the execution portion.
-
-### One-button test funding
-
-Choose **Connect wallet & fund my account** (or **Get faucet funds & deposit 250 USDC** when connected). Approve the faucet claim, USDC allowance and deposit in your wallet. The hosted site asks for username/password first. Funding does not require wallet verification; account sessions do. The app claims only when eligible and deposits exactly 250 USDC; remaining faucet tokens stay in your wallet. During the 12-hour cooldown it can deposit existing USDC. Each successful run adds another 250 USDC. Get native test MON from the linked Monad faucet first. If you reject a wallet prompt, retry; already completed claim and allowance steps are read from chain.
+Stop first disables worker scheduling, then the root signs an onchain pause. Revocation removes TRADE permission. A previously submitted transaction can settle before either lands. An owner withdrawal uses three signatures, spends no participant MON, and revokes the temporary helper permission in its own transaction.

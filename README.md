@@ -1,5 +1,7 @@
 # Kuru Baskets
 
+All participant actions are sponsored: funding, setup, trading, pause, revocation and USDC withdrawal. No native MON is required. See [the gasless flow](docs/GASLESS.md).
+
 An example application for policy-limited, AI-managed baskets on Monad testnet. Gold, ETH, BTC and cash are **faucet assets**, not backed RWAs. Funds stay in the participant's Kuru AccountCore balance.
 
 ## Run locally
@@ -23,8 +25,8 @@ The worker needs dedicated `manager` and `relayer` private keys in the file sele
 
 ## Authority and execution
 
-1. The owner deposits assets and configures a policy with a manager address, price bands, caps and a maximum 30-minute expiry.
-2. The owner creates a Mera passkey signer, delegates it to MeraPortfolio using EIP-7702, and grants its EOA `TRADE` permission. It receives no withdrawal, transfer or administration permission.
+1. The workshop faucet deposits 250 test USDC directly into AccountCore. The owner signs the trading limits and a maximum 30-minute expiry.
+2. The owner creates a Mera passkey signer and signs its delegation and TRADE authorization; the relayer submits both. It receives no withdrawal, transfer or administration permission.
 3. Codex produces three shared basket targets. It sees numeric market snapshots, not wallet keys or participant prompts.
 4. A deterministic planner creates a bounded rebalance. The manager signs it, and a separate gas-paying relayer calls the Mera EOA after simulation.
 5. The contract checks the live permission, signature, authorization epoch, policy version, nonce, expiry, allowlisted markets and actual swap results.
@@ -43,7 +45,7 @@ Root-account balances are shared with the owner's other activity. Available bala
 - `ops/`: container build and portable Compose configuration.
 - `docs/`: workshop runbook and deployment operations.
 
-The current example runs from this branch. See [docs/MERA.md](docs/MERA.md) for the delegation, policy callbacks, migration accounting and setup flow.
+The current example runs from this branch. See [docs/GASLESS.md](docs/GASLESS.md) for the delegation, policy callbacks, migration accounting and setup flow.
 
 ## Verification
 

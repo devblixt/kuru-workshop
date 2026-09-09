@@ -15,6 +15,9 @@ export const deployment = {
   ] as const,
 };
 export const coreAbi=parseAbi([
+ 'function depositForAccount(address account,address token,uint256 amount) payable',
+ 'function authorizeAccountSignerBySig(address account,address authorizer,address signer,uint32 permissions,uint64 expiry,uint256 nonce,uint256 deadline,bytes signature)',
+ 'function revokeAccountSignerBySig(address account,address authorizer,address signer,uint256 nonce,uint256 deadline,bytes signature)',
  'function deposit(address token,uint256 amount) payable','function withdraw(address token,uint256 amount)',
  'function userRegistry(address) view returns(uint40)','function userAddressById(uint40) view returns(address)',
  'function getAccountOwner(address) view returns(address)','function getAccountSubaccountSeq(address) view returns(uint16)',
@@ -34,4 +37,4 @@ export const bookAbi=parseAbi([
 ]);
 export const faucetAbi=parseAbi(['function claim()','function nextClaimAt(address) view returns(uint256)']);
 export const planTypes={Trade:[{name:'marketIndex',type:'uint8'},{name:'isBuy',type:'bool'},{name:'amountIn',type:'uint128'},{name:'minAmountOut',type:'uint128'}],Plan:[{name:'accountId',type:'uint40'},{name:'version',type:'uint256'},{name:'authNonce',type:'uint256'},{name:'nonce',type:'uint256'},{name:'deadline',type:'uint64'},{name:'trades',type:'Trade[]'}]} as const;
-export const domain=(policy:Address)=>({name:'KuruPortfolioPolicy',version:'1',chainId:chain.id,verifyingContract:policy});
+export const domain=(policy:Address,version='1')=>({name:'KuruPortfolioPolicy',version,chainId:chain.id,verifyingContract:policy});

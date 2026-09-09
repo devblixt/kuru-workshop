@@ -31,3 +31,23 @@ test('delegation sponsorship binds chain, implementation, signer, wallet session
   db.prepare('UPDATE auth SET address=?').run('0x4444444444444444444444444444444444444444');assert.equal((await app.inject({url:'/api/mera/delegation/'+id,headers})).statusCode,404);
  }finally{config.mera=oldMera;rpc.getTransactionCount=oldNonce;await app.close();db.close();}
 });
+
+test('gasless requests reject arbitrary calls, recipients, permissions and out-of-range amounts',async()=>{
+ const {ownerRequestSchema}=await import('../packages/shared/gasless.ts');
+ assert(ownerRequestSchema.safeParse({kind:'fund'}).success);
+ for(const input of [{kind:'fund',account:'0x1111111111111111111111111111111111111111'},{kind:'call',to:'0x1111111111111111111111111111111111111111',data:'0x1234'},{kind:'fund',amount:'999999999'},{kind:'authorize',permission:{signer:'0x1111111111111111111111111111111111111111',permissions:8,nonce:'0',deadline:'1',signature:'0x1234'}}])assert(!ownerRequestSchema.safeParse(input).success);
+});
+test('gasless jobs require wallet authentication and job results are owner-scoped',async()=>{
+ const db=openStore(':memory:'),app=await createApi(db);const digest=(v:string)=>createHash('sha256').update(v).digest('hex');
+ const root='0x3333333333333333333333333333333333333333';
+ db.prepare('INSERT INTO site_sessions VALUES(?,?)').run(digest('site'),Date.now()+60000);
+ db.prepare('INSERT INTO auth VALUES(?,?,?)').run(digest('wallet'),root,Date.now()+60000);
+ db.prepare("INSERT INTO owner_jobs(id,address,request,status,created) VALUES('job',?,'{}','queued',?)").run(root,Date.now());
+ try{
+  assert.equal((await app.inject({method:'POST',url:'/api/owner/actions',headers:{origin:config.origin,cookie:'workshop_site=site'},payload:{kind:'fund'}})).statusCode,401);
+  const headers={cookie:'workshop_site=site; workshop=wallet'};
+  assert.equal((await app.inject({url:'/api/owner/actions/job',headers})).statusCode,200);
+  db.prepare('UPDATE auth SET address=?').run('0x4444444444444444444444444444444444444444');
+  assert.equal((await app.inject({url:'/api/owner/actions/job',headers})).statusCode,404);
+ }finally{await app.close();db.close();}
+});
