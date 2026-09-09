@@ -1,8 +1,9 @@
+import {recoverAuthorizationAddress} from 'viem/utils';
 import Fastify from 'fastify';
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
 import staticPlugin from '@fastify/static';
-import {randomBytes,createHash,timingSafeEqual} from 'node:crypto';
+import {randomUUID,randomBytes,createHash,timingSafeEqual} from 'node:crypto';
 import {existsSync} from 'node:fs';
 import {resolve} from 'node:path';
 import {getAddress,isAddress,zeroAddress,type Address,type Hex} from 'viem';
@@ -34,7 +35,7 @@ export async function createApi(db=openStore(),kuruData=createKuruData()){
  app.setErrorHandler((error,_req,reply)=>reply.code(error instanceof z.ZodError?400:400).send({error:asError(error)}));
  app.get('/api/site/status',async req=>({authenticated:siteSession(req)}));
  app.post('/api/site/login',{config:{rateLimit:{max:60,timeWindow:60000}}},async(req,reply)=>{
-  if(!config.siteUsername||!config.sitePassword)return reply.code(503).send({error:'Operator must configure website credentials'});
+  if(!config.siteUsername||!config.sitePassword)return reply.code(503).send({error:'Website login is not configured'});
   const body=z.object({username:z.string().max(100),password:z.string().max(200)}).parse(req.body);
   const userOK=timingSafeEqual(digest(body.username),digest(config.siteUsername));const passOK=timingSafeEqual(digest(body.password),digest(config.sitePassword));
   if(!userOK||!passOK)return reply.code(401).send({error:'Incorrect username or password'});
@@ -51,7 +52,7 @@ export async function createApi(db=openStore(),kuruData=createKuruData()){
  });
  app.get('/api/markets',async(_req,reply)=>{try{return await kuruData.markets();}catch{return reply.code(503).send({error:'Kuru market API unavailable. Retry shortly.'});}});
  app.get('/api/trades',async(req,reply)=>{const address=await user(req,reply);if(!address)return;const a=await cachedAccount(address);if(a.id==='0')return {source:'kuru-data-source',fetchedAt:Date.now(),feedEpoch:null,userSeq:null,hasMore:false,trades:[]};try{const result=await kuruData.trades(a.id);return {...result,trades:result.trades.map(t=>({...t,managerExecution:!!db.prepare("SELECT hash FROM transactions WHERE address=? AND hash=? AND status='confirmed'").get(address,t.hash)}))};}catch{return reply.code(503).send({error:'Kuru trade history unavailable. Retry shortly.'});}});
- app.get('/api/config',async()=>({deployment,policy:config.policy,manager:config.manager,chainId:chain.id,initialWeights,origin:config.origin}));
+ app.get('/api/config',async()=>({deployment,policy:config.policy,meraImplementation:config.mera,manager:config.manager,chainId:chain.id,initialWeights,origin:config.origin}));
  app.get('/api/health',async()=>({deployment:getState(db,'deployment'),worker:getState(db,'worker'),market:getState(db,'market'),model:getState(db,'model'),relayer:getState(db,'relayer'),queue:db.prepare("SELECT COUNT(*) n, MIN(created) oldestCreated FROM transactions WHERE status='pending'").get(),configured:config.policy!==zeroAddress,hostedData:kuruData.status()}));
  app.post('/api/auth/challenge',{config:{rateLimit:{max:10,timeWindow:60000}}},async(req,reply)=>{
   const body=z.object({address:z.string()}).parse(req.body);
@@ -84,11 +85,26 @@ export async function createApi(db=openStore(),kuruData=createKuruData()){
   let cursor=0;const push=()=>{const rows=db.prepare('SELECT * FROM events WHERE address=? AND id>? ORDER BY id LIMIT 60').all(address,cursor) as any[];for(const row of rows){reply.raw.write(`id: ${row.id}\ndata: ${JSON.stringify(row)}\n\n`);cursor=row.id;}reply.raw.write(': heartbeat\n\n');};
   push();const timer=setInterval(()=>{if(!siteSession(req)){clearInterval(timer);reply.raw.end();return;}push();},5000);req.raw.on('close',()=>clearInterval(timer));
  });
+ app.post('/api/mera/delegation',{config:{rateLimit:{max:5,timeWindow:60000}}},async(req,reply)=>{
+  const address=await user(req,reply);if(!address)return;
+  if(config.mera===zeroAddress)throw new Error('Mera deployment is not configured');
+  const b=z.object({mera:z.string().regex(/^0x[0-9a-fA-F]{40}$/),authorization:z.object({address:z.string().regex(/^0x[0-9a-fA-F]{40}$/),chainId:z.literal(chain.id),nonce:z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),yParity:z.union([z.literal(0),z.literal(1)]),r:z.string().regex(/^0x[0-9a-fA-F]{64}$/),s:z.string().regex(/^0x[0-9a-fA-F]{64}$/)})}).parse(req.body);
+  const recovered=await recoverAuthorizationAddress({authorization:b.authorization as any});
+  if(recovered.toLowerCase()!==b.mera.toLowerCase()||b.authorization.address.toLowerCase()!==config.mera.toLowerCase()||b.mera.toLowerCase()===address.toLowerCase())throw new Error('Authorization must delegate a separate Mera wallet to the workshop implementation');
+  if(await rpc.getTransactionCount({address:recovered,blockTag:'pending'})!==b.authorization.nonce)throw new Error('Mera authorization nonce changed; unlock and retry');
+  const id=atomic(db,()=>{
+   const old=db.prepare("SELECT id FROM delegations WHERE address=? AND status IN ('queued','pending')").get(address) as any;if(old)return old.id;
+   const n=db.prepare('SELECT COUNT(*) n FROM delegations WHERE address=? AND created>?').get(address,Date.now()-86400000) as any;
+   if(n.n>=5)throw new Error('Daily delegation sponsorship limit reached');
+   const id=randomUUID();db.prepare("INSERT INTO delegations(id,address,mera,authorization,status,created) VALUES(?,?,?,?,'queued',?)").run(id,address,recovered,stringify(b.authorization),Date.now());return id;
+  });return {id};
+ });
+ app.get('/api/mera/delegation/:id',async(req,reply)=>{const address=await user(req,reply);if(!address)return;const {id}=req.params as {id:string};const row=db.prepare('SELECT id,mera,status,hash,error FROM delegations WHERE id=? AND address=?').get(id,address);if(!row)return reply.code(404).send({error:'Delegation job not found'});return row;});
  app.post('/api/sessions',async(req,reply)=>{
   const address=await user(req,reply);if(!address)return;
   const {profile}=z.object({profile:z.enum(profiles)}).parse(req.body);const a=await accountState(address);
   if(!a.policy||!a.authorized||a.policy.paused||a.policy.config.manager.toLowerCase()!==config.manager.toLowerCase()||Number(a.policy.config.expiry)*1000<=Date.now())throw new Error('Configure and authorize the policy first');
-  const id=newSession(db,{address,account_id:a.id,profile,version:String(a.policy.version),expires:Math.min(Number(a.policy.config.expiry)*1000,Date.now()+1800000)});
+  const id=newSession(db,{address,account_id:a.id,executor:a.executor,profile,version:String(a.policy.version),expires:Math.min(Number(a.policy.config.expiry)*1000,Date.now()+1800000)});
   event(db,address,'session','Manager enabled for '+profile+'. It will check once per minute.');return {id};
  });
  app.post('/api/session/profile',async(req,reply)=>{const address=await user(req,reply);if(!address)return;const {profile}=z.object({profile:z.enum(profiles)}).parse(req.body);db.prepare("UPDATE sessions SET profile=? WHERE address=? AND status='active'").run(profile,address);event(db,address,'profile','Following '+profile+' within your existing policy.');return {ok:true};});

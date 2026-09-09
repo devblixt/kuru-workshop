@@ -1,5 +1,6 @@
 import {createPublicClient,http,custom,zeroAddress,keccak256,stringToHex,toHex,type Address,type Hex} from 'viem';
 import {chain,deployment,coreAbi,bookAbi} from '../../../packages/shared/manifest.ts';
+import {meraAbi} from '../../../packages/shared/meraAbi.ts';
 import {policyAbi} from '../../../packages/shared/policyAbi.ts';
 import {config} from './config.ts';
 import type {Snapshot} from '../../../packages/shared/model.ts';
@@ -34,6 +35,11 @@ export async function verifyDeployment(){
   if(values[0].toLowerCase()!==deployment.core.toLowerCase())throw new Error('Policy core mismatch');
   for(let i=0;i<3;i++)if(values[i+1].toLowerCase()!==deployment.markets[i].address.toLowerCase())throw new Error('Policy market mismatch');
  }
+ if(config.mera!==zeroAddress){
+  const code=await rpc.getCode({address:config.mera});if(!code||!config.meraCodeHash||keccak256(code)!==config.meraCodeHash)throw new Error('Mera implementation runtime mismatch');
+  const [core,legacy]=await rpc.multicall({multicallAddress,allowFailure:false,contracts:[{address:config.mera,abi:meraAbi,functionName:'core'},{address:config.mera,abi:meraAbi,functionName:'legacy'}]});
+  if(core.toLowerCase()!==deployment.core.toLowerCase()||legacy.toLowerCase()!==config.policy.toLowerCase())throw new Error('Mera deployment mismatch');
+ }
  lastVerified=Date.now();
 }
 export async function snapshot():Promise<Snapshot>{
@@ -50,7 +56,7 @@ export async function snapshot():Promise<Snapshot>{
  }
  return {block:String(block.number),at:Date.now(),markets};
 }
-export async function accountState(address:Address,atBlock?:bigint){
+export async function accountState(address:Address,atBlock?:bigint,selectedPolicy?:Address){
  const blockNumber=atBlock??await rpc.getBlockNumber();
  const values=await rpc.multicall({multicallAddress,blockNumber,allowFailure:false,contracts:[
   {address:deployment.core,abi:coreAbi,functionName:'userRegistry',args:[address]},
@@ -58,12 +64,22 @@ export async function accountState(address:Address,atBlock?:bigint){
   {address:deployment.core,abi:coreAbi,functionName:'accountSignerAuthorizationNonces',args:[address]},
   {address:deployment.core,abi:coreAbi,functionName:'isAuthorizedAccountSigner',args:[address,config.policy,1]},
  ] as any}) as any[];
- const id=String(values[0]),balances=values.slice(1,5).map(String),authNonce=String(values[5]),authorized=!!values[6];
- if(config.policy===zeroAddress||id==='0')return {id,block:String(blockNumber),balances,policy:null,usage:null,nonce:'0',authorized,authNonce};
+ const id=String(values[0]),balances=values.slice(1,5).map(String),authNonce=String(values[5]);
+ let authorized=!!values[6],executor=config.policy,policyAddress=config.policy;
+ if(config.mera!==zeroAddress&&id!=='0'&&selectedPolicy!==config.policy){
+  const signer=await rpc.readContract({address:config.mera,abi:meraAbi,functionName:'signerForAccount',args:[Number(id)],blockNumber});
+  if(signer!==zeroAddress){
+   executor=signer;policyAddress=config.mera;
+   const allowed=await rpc.readContract({address:deployment.core,abi:coreAbi,functionName:'isAuthorizedAccountSigner',args:[address,signer,1],blockNumber});
+   const code=await rpc.getCode({address:signer,blockNumber});
+   authorized=allowed&&!values[6]&&code?.toLowerCase()===('0xef0100'+config.mera.slice(2)).toLowerCase();
+  }
+ }
+ if(config.policy===zeroAddress||id==='0')return {id,executor,policyAddress,mode:policyAddress===config.mera?'mera':'legacy',block:String(blockNumber),balances,policy:null,usage:null,nonce:'0',authorized,authNonce};
  const [policy,usage,nonce]=await rpc.multicall({multicallAddress,blockNumber,allowFailure:false,contracts:[
-  {address:config.policy,abi:policyAbi,functionName:'getPolicy',args:[Number(id)]},
-  {address:config.policy,abi:policyAbi,functionName:'getUsage',args:[Number(id)]},
-  {address:config.policy,abi:policyAbi,functionName:'nonces',args:[Number(id)]},
+  {address:policyAddress,abi:policyAbi,functionName:'getPolicy',args:[Number(id)]},
+  {address:policyAddress,abi:policyAbi,functionName:'getUsage',args:[Number(id)]},
+  {address:policyAddress,abi:policyAbi,functionName:'nonces',args:[Number(id)]},
  ]});
- return {id,block:String(blockNumber),balances,policy,usage,nonce:String(nonce),authorized,authNonce};
+ return {id,executor,policyAddress,mode:policyAddress===config.mera?'mera':'legacy',block:String(blockNumber),balances,policy,usage,nonce:String(nonce),authorized,authNonce};
 }

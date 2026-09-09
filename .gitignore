@@ -16,3 +16,5 @@ runtime/
 *.key
 .DS_Store
 apps/web/public/downloads/
+
+artifacts/mera-deploy-pending.json

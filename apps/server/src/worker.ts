@@ -1,5 +1,6 @@
+import {recoverAuthorizationAddress} from 'viem/utils';
 import {randomUUID} from 'node:crypto';
-import {createWalletClient,http,keccak256,parseEther,type Hex,type Address} from 'viem';
+import {createWalletClient,http,keccak256,parseEther,encodeFunctionData,type Hex,type Address} from 'viem';
 import {privateKeyToAccount} from 'viem/accounts';
 import {chain,domain,planTypes} from '../../../packages/shared/manifest.ts';
 import {policyAbi} from '../../../packages/shared/policyAbi.ts';
@@ -21,8 +22,8 @@ async function capDemos(){
    const amountIn=(remaining<c.tradeCap?remaining:c.tradeCap)+10010000n;
    if(BigInt(a.balances[3])<amountIn)throw new Error('The cap demo needs '+(Number(amountIn)/1e6).toFixed(2)+' available USDC. Deposit more faucet USDC first; this simulation spends nothing.');
    const plan={accountId:Number(a.id),version:a.policy.version,authNonce:BigInt(a.authNonce),nonce:BigInt(a.nonce),deadline:BigInt(Math.min(Math.floor(Date.now()/1000)+30,Number(c.expiry))),trades:[{marketIndex:0,isBuy:true,amountIn,minAmountOut:1n}]};
-   const signature=await manager.signTypedData({domain:domain(config.policy),types:planTypes,primaryType:'Plan',message:plan});
-   let rejected=false;try{await rpc.simulateContract({address:config.policy,abi:policyAbi,functionName:'executeRebalance',args:[plan,signature],account:relayer});}catch(e){if(String(e).includes('BudgetExceeded'))rejected=true;else throw e;}
+   const signature=await manager.signTypedData({domain:domain(a.executor),types:planTypes,primaryType:'Plan',message:plan});
+   let rejected=false;try{await rpc.simulateContract({address:a.executor,abi:policyAbi,functionName:'executeRebalance',args:[plan,signature],account:relayer});}catch(e){if(String(e).includes('BudgetExceeded'))rejected=true;else throw e;}
    if(!rejected)throw new Error('Cap was not reached by this fill; no transaction was submitted');
    event(db,address,'simulation','Verified: the policy rejected the simulated trade with BudgetExceeded. Your balances and daily usage are unchanged.');
   }catch(e){event(db,address,'simulation',asError(e));}
@@ -40,9 +41,16 @@ async function reconcile(){
    await wallet.sendRawTransaction({serializedTransaction:row.raw}).catch(()=>{});return false;
   }
   const finalized=await rpc.getBlock({blockTag:'finalized'});if(finalized.number<receipt.blockNumber)return false;
-  if(receipt.status==='reverted'){db.prepare("UPDATE transactions SET status='reverted',error='Onchain revert' WHERE hash=?").run(row.hash);event(db,row.address,'reverted','Relayer transaction reverted. Refresh policy usage: another relayer may have executed the same signed intent.',row.hash);continue;}
+  if(receipt.status==='reverted'&&JSON.parse(row.plan).kind!=='delegation'){db.prepare("UPDATE transactions SET status='reverted',error='Onchain revert' WHERE hash=?").run(row.hash);event(db,row.address,'reverted','Relayer transaction reverted. Refresh policy usage: another relayer may have executed the same signed intent.',row.hash);continue;}
   const plan=JSON.parse(row.plan);
-  const a=await accountState(row.address,receipt.blockNumber);const nonce=BigInt(a.nonce),usage=a.usage!;
+  if(plan.kind==='delegation'){
+   const code=await rpc.getCode({address:plan.mera,blockNumber:receipt.blockNumber});
+   const ok=code?.toLowerCase()===('0xef0100'+config.mera.slice(2)).toLowerCase();
+   db.prepare('UPDATE delegations SET status=?,error=? WHERE id=?').run(ok?'confirmed':'failed',ok?null:'Delegation code read-back failed',plan.jobId);
+   db.prepare('UPDATE transactions SET status=? WHERE hash=?').run(ok?'confirmed':'failed',row.hash);
+   event(db,row.address,ok?'delegation':'failed',ok?'Mera delegation confirmed. Configure limits and grant its address TRADE permission.':'Mera code did not match the signed delegation.',row.hash);continue;
+  }
+  const a=await accountState(row.address,receipt.blockNumber,plan.policyAddress||config.policy);const nonce=BigInt(a.nonce),usage=a.usage!;
   if(nonce!==BigInt(plan.nonce)+1n)throw new Error('Policy nonce read-back did not match receipt');
   db.prepare("UPDATE transactions SET status='confirmed',error=NULL WHERE hash=?").run(row.hash);
   event(db,row.address,'trade',`Rebalance finalized. Daily buys ${(Number(usage.bought)/1e6).toFixed(2)}, sells ${(Number(usage.sold)/1e6).toFixed(2)} reference USDC.`,row.hash);
@@ -57,7 +65,7 @@ async function decide(s:Snapshot):Promise<Decision>{
 }
 async function execute(session:Session,s:Snapshot,d:Decision){
  const address=session.address as Address;const a=await accountState(address);
- if(!a.policy||a.policy.paused||String(a.policy.version)!==session.version||!a.authorized||Number(a.policy.config.expiry)*1000<=Date.now()){
+ if(!a.policy||(session.executor||config.policy).toLowerCase()!==a.executor.toLowerCase()||a.policy.paused||String(a.policy.version)!==session.version||!a.authorized||Number(a.policy.config.expiry)*1000<=Date.now()){
   db.prepare("UPDATE sessions SET status='invalidated' WHERE id=?").run(session.id);event(db,address,'paused','Policy expired, changed or was revoked. Start a new authorized session.');return;
  }
  const basket=d.baskets.find(b=>b.profile===session.profile)!;
@@ -67,21 +75,43 @@ async function execute(session:Session,s:Snapshot,d:Decision){
  const plan={accountId:Number(a.id),version:a.policy.version,authNonce:BigInt(a.authNonce),nonce:BigInt(a.nonce),deadline,trades};
  // eth_call authenticates the manager signature, so signing precedes the complete simulation;
  // no transaction is submitted unless simulation and a final session check succeed.
- const signature=await manager.signTypedData({domain:domain(config.policy),types:planTypes,primaryType:'Plan',message:plan});
- const {request}=await rpc.simulateContract({address:config.policy,abi:policyAbi,functionName:'executeRebalance',args:[plan,signature],account:relayer});
+ const signature=await manager.signTypedData({domain:domain(a.executor),types:planTypes,primaryType:'Plan',message:plan});
+ const {request}=await rpc.simulateContract({address:a.executor,abi:policyAbi,functionName:'executeRebalance',args:[plan,signature],account:relayer});
  const fresh=db.prepare("SELECT profile FROM sessions WHERE id=? AND status='active' AND expires>?").get(session.id,Date.now()) as {profile:string}|undefined;
  if(!fresh||fresh.profile!==session.profile)return;
  const {encodeFunctionData}=await import('viem');const data=encodeFunctionData({abi:policyAbi,functionName:'executeRebalance',args:request.args});
- const tx=await wallet.prepareTransactionRequest({to:config.policy,data});
+ const tx=await wallet.prepareTransactionRequest({to:a.executor,data});
  if((tx.gas||0n)*(tx.maxFeePerGas||tx.gasPrice||0n)>parseEther('0.3'))throw new Error('Relayer transaction exceeds 0.3 MON gas budget');
  const raw=await wallet.signTransaction(tx),hash=keccak256(raw);
  if(!lease(db,'worker',owner,180000))throw new Error('Worker lease lost before broadcast');
  const stillActive=db.prepare("SELECT profile FROM sessions WHERE id=? AND status='active' AND expires>?").get(session.id,Date.now()) as {profile:string}|undefined;
  if(!stillActive||stillActive.profile!==session.profile)return;
- db.prepare('INSERT INTO transactions(hash,address,session_id,nonce,raw,plan,status,created) VALUES(?,?,?,?,?,?,?,?)').run(hash,address,session.id,tx.nonce,raw,stringify(plan),'pending',Date.now());
+ db.prepare('INSERT INTO transactions(hash,address,session_id,nonce,raw,plan,status,created) VALUES(?,?,?,?,?,?,?,?)').run(hash,address,session.id,tx.nonce,raw,stringify({...plan,executor:a.executor,policyAddress:a.policyAddress}),'pending',Date.now());
  event(db,address,'submitted',basket.explanation,hash);
  await wallet.sendRawTransaction({serializedTransaction:raw});
  await rpc.waitForTransactionReceipt({hash,timeout:15000});await reconcile();
+}
+async function delegations(){
+ const jobs=db.prepare("SELECT * FROM delegations WHERE status='queued' ORDER BY created LIMIT 1").all() as any[];
+ for(const job of jobs){
+  try{
+   const authorization=JSON.parse(job.authorization);
+   if(Date.now()-job.created>300000)throw new Error('Delegation request expired; retry setup');
+   if(authorization.chainId!==chain.id||authorization.address.toLowerCase()!==config.mera.toLowerCase()||(await recoverAuthorizationAddress({authorization})).toLowerCase()!==job.mera.toLowerCase()||job.mera.toLowerCase()===relayer.address.toLowerCase())throw new Error('Invalid delegation authorization');
+   if(await rpc.getTransactionCount({address:job.mera,blockTag:'pending'})!==authorization.nonce)throw new Error('Mera nonce changed; retry setup');
+   // Getter succeeds before and after delegation; no account configuration is accepted here.
+   const tx=await wallet.prepareTransactionRequest({to:config.mera,data:encodeFunctionData({abi:[{type:'function',name:'implementation',inputs:[],outputs:[{type:'address'}],stateMutability:'view'}],functionName:'implementation'}),authorizationList:[authorization]});
+   if((tx.gas||0n)*(tx.maxFeePerGas||tx.gasPrice||0n)>parseEther('0.1'))throw new Error('Delegation exceeds 0.1 MON gas budget');
+   const raw=await wallet.signTransaction(tx),hash=keccak256(raw);
+   if(!lease(db,'worker',owner,180000))throw new Error('Worker lease lost');
+   db.exec('BEGIN IMMEDIATE');try{
+    db.prepare('INSERT INTO transactions(hash,address,session_id,nonce,raw,plan,status,created) VALUES(?,?,?,?,?,?,?,?)').run(hash,job.address,'delegation:'+job.id,tx.nonce,raw,stringify({kind:'delegation',jobId:job.id,mera:job.mera}),'pending',Date.now());
+    db.prepare("UPDATE delegations SET status='pending',hash=? WHERE id=?").run(hash,job.id);db.exec('COMMIT');
+   }catch(e){db.exec('ROLLBACK');throw e;}
+   // Any broadcast uncertainty is recovered using this journal's exact bytes.
+   await wallet.sendRawTransaction({serializedTransaction:raw}).catch(()=>{});
+  }catch(e){db.prepare("UPDATE delegations SET status='failed',error=? WHERE id=? AND status='queued'").run(asError(e),job.id);}
+ }
 }
 async function cycle(){
  if(!lease(db,'worker',owner,180000))return;
@@ -91,6 +121,7 @@ async function cycle(){
   await verifyDeployment();state(db,'deployment',{ok:true});
   const balance=await rpc.getBalance({address:relayer.address});state(db,'relayer',{ok:balance>parseEther('0.1'),address:relayer.address,balance});
   if(!await reconcile())return;
+  await delegations();if(!await reconcile())return;
   await capDemos();
   db.prepare("UPDATE sessions SET status='expired' WHERE status='active' AND expires<=?").run(Date.now());
   const s=await snapshot();state(db,'market',s);

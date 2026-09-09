@@ -15,14 +15,18 @@ export function openStore(path=config.db){
  CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY,value TEXT NOT NULL,at INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS leases(name TEXT PRIMARY KEY,owner TEXT NOT NULL,expires INTEGER NOT NULL);
  CREATE TABLE IF NOT EXISTS transactions(hash TEXT PRIMARY KEY,address TEXT NOT NULL,session_id TEXT NOT NULL,nonce INTEGER NOT NULL,raw TEXT NOT NULL,plan TEXT NOT NULL,status TEXT NOT NULL,created INTEGER NOT NULL,error TEXT);
- `); return db;
+ CREATE TABLE IF NOT EXISTS delegations(id TEXT PRIMARY KEY,address TEXT NOT NULL,mera TEXT NOT NULL,authorization TEXT NOT NULL,status TEXT NOT NULL,hash TEXT,error TEXT,created INTEGER NOT NULL);
+ CREATE UNIQUE INDEX IF NOT EXISTS pending_delegation ON delegations(address) WHERE status IN ('queued','pending');
+ `);
+ if(!(db.prepare('PRAGMA table_info(sessions)').all() as any[]).some(c=>c.name==='executor'))db.exec("ALTER TABLE sessions ADD COLUMN executor TEXT NOT NULL DEFAULT ''");
+ return db;
 }
 export type Store=ReturnType<typeof openStore>;
-export type Session={id:string,address:string,account_id:string,profile:Profile,version:string,expires:number,status:string,last_cycle:number};
+export type Session={id:string,address:string,account_id:string,profile:Profile,version:string,expires:number,status:string,last_cycle:number,executor?:string};
 export function atomic<T>(db:Store,fn:()=>T):T{db.exec('BEGIN IMMEDIATE');try{const r=fn();db.exec('COMMIT');return r;}catch(e){db.exec('ROLLBACK');throw e;}}
 export function event(db:Store,address:string,kind:string,message:string,hash?:string){db.prepare('INSERT INTO events(address,at,kind,message,hash) VALUES(?,?,?,?,?)').run(address.toLowerCase(),Date.now(),kind,message,hash||null);}
 export function state(db:Store,key:string,value:unknown){db.prepare('INSERT INTO state VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,at=excluded.at').run(key,stringify(value),Date.now());}
 export function getState(db:Store,key:string):any{const r=db.prepare('SELECT value,at FROM state WHERE key=?').get(key) as {value:string,at:number}|undefined;return r?{value:JSON.parse(r.value),at:r.at}:null;}
 export function lease(db:Store,name:string,owner:string,ttl:number):boolean{return atomic(db,()=>{const r=db.prepare('SELECT owner,expires FROM leases WHERE name=?').get(name) as any;if(r&&r.expires>Date.now()&&r.owner!==owner)return false;db.prepare('INSERT INTO leases VALUES(?,?,?) ON CONFLICT(name) DO UPDATE SET owner=excluded.owner,expires=excluded.expires').run(name,owner,Date.now()+ttl);return true;});}
 export function release(db:Store,name:string,owner:string){db.prepare('DELETE FROM leases WHERE name=? AND owner=?').run(name,owner);}
-export function newSession(db:Store,args:Omit<Session,'id'|'status'|'last_cycle'>){return atomic(db,()=>{db.prepare("UPDATE sessions SET status='expired' WHERE status='active' AND expires<=?").run(Date.now());if(Number((db.prepare("SELECT COUNT(*) n FROM sessions WHERE status='active'").get() as any).n)>=25)throw new Error('Workshop is full');const id=randomUUID();db.prepare('INSERT INTO sessions VALUES(?,?,?,?,?,?,?,0)').run(id,args.address,args.account_id,args.profile,args.version,args.expires,'active');return id;});}
+export function newSession(db:Store,args:Omit<Session,'id'|'status'|'last_cycle'>){return atomic(db,()=>{db.prepare("UPDATE sessions SET status='expired' WHERE status='active' AND expires<=?").run(Date.now());if(Number((db.prepare("SELECT COUNT(*) n FROM sessions WHERE status='active'").get() as any).n)>=25)throw new Error('Workshop is full');const id=randomUUID();db.prepare('INSERT INTO sessions(id,address,account_id,profile,version,expires,status,last_cycle,executor) VALUES(?,?,?,?,?,?,?,0,?)').run(id,args.address,args.account_id,args.profile,args.version,args.expires,'active',args.executor||'');return id;});}

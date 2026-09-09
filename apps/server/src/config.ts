@@ -5,6 +5,8 @@ export const config={
  origin:process.env.PUBLIC_ORIGIN||'http://localhost:8789', port:Number(process.env.PORT||8789),
  rpc:process.env.RPC_URL||'https://testnet-rpc.monad.xyz',
  policy:(process.env.POLICY_ADDRESS||'0x0000000000000000000000000000000000000000') as Address,
+ mera:(process.env.MERA_IMPLEMENTATION||'0x0000000000000000000000000000000000000000') as Address,
+ meraCodeHash:process.env.MERA_CODE_HASH||'',
  manager:(process.env.MANAGER_ADDRESS||'0x0000000000000000000000000000000000000000') as Address,
  policyCodeHash:process.env.POLICY_CODE_HASH||'',
  db:process.env.DB_PATH||'workshop.sqlite',

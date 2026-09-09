@@ -1,6 +1,6 @@
 # Kuru Baskets
 
-A 45–60 minute workshop application for policy-limited, AI-managed baskets on Monad testnet. Gold, ETH, BTC and cash are **faucet assets**, not backed RWAs. Funds stay in the participant's Kuru AccountCore balance.
+An example application for policy-limited, AI-managed baskets on Monad testnet. Gold, ETH, BTC and cash are **faucet assets**, not backed RWAs. Funds stay in the participant's Kuru AccountCore balance.
 
 ## Run locally
 
@@ -24,9 +24,9 @@ The worker needs dedicated `manager` and `relayer` private keys in the file sele
 ## Authority and execution
 
 1. The owner deposits assets and configures a policy with a manager address, price bands, caps and a maximum 30-minute expiry.
-2. The owner grants the policy contract `TRADE` permission. It receives no withdrawal, transfer or administration permission.
+2. The owner creates a Mera passkey signer, delegates it to MeraPortfolio using EIP-7702, and grants its EOA `TRADE` permission. It receives no withdrawal, transfer or administration permission.
 3. Codex produces three shared basket targets. It sees numeric market snapshots, not wallet keys or participant prompts.
-4. A deterministic planner signs a typed rebalance, simulates it and submits it through a separate gas-paying account.
+4. A deterministic planner creates a bounded rebalance. The manager signs it, and a separate gas-paying relayer calls the Mera EOA after simulation.
 5. The contract checks the live permission, signature, authorization epoch, policy version, nonce, expiry, allowlisted markets and actual swap results.
 
 Buy usage includes fees. Sell usage is rounded up at the first configured reference price for that UTC day. Reconfiguration preserves the day's references and usage. Price bands constrain each leg's realized average, including fees; individual fills and portfolio drawdown are not constrained. All legs revert together on failure. No resting orders are created by the policy.
@@ -36,14 +36,14 @@ Root-account balances are shared with the owner's other activity. Available bala
 ## Repository map
 
 - `contracts/`: policy and independent accounting tests; OpenZeppelin and forge-std source are vendored with provenance below.
-- `apps/web/`: React frontend and SDK exercises.
+- `apps/web/`: React frontend, Mera passkey setup and SDK integration.
 - `apps/server/`: API, durable worker, planner and isolated Codex service.
 - `packages/shared/`: canonical deployment manifest, generated policy ABI and decision schemas.
 - `scripts/`: preflight, policy deployment and bounded liquidity seeding.
 - `ops/`: container build and portable Compose configuration.
 - `docs/`: workshop runbook and deployment operations.
 
-`solution` is the completed application. `starter` removes the implementations in the workshop exercise module. The infrastructure and deployed policy are supplied to participants; Solidity deployment is not a 45-minute prerequisite.
+The current example runs from this branch. See [docs/MERA.md](docs/MERA.md) for the delegation, policy callbacks, migration accounting and setup flow.
 
 ## Verification
 
