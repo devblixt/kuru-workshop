@@ -1,0 +1,12 @@
+import {snapshot} from '../apps/server/src/chain.ts';
+import {config} from '../apps/server/src/config.ts';
+import {decisionSchema,stringify} from '../packages/shared/model.ts';
+import {writeFileSync} from 'node:fs';
+const health=await fetch(config.runner+'/health').then(r=>r.json());
+const s=await snapshot(),start=Date.now();
+const response=await fetch(config.runner+'/decide',{method:'POST',headers:{'Content-Type':'application/json'},body:stringify(s),signal:AbortSignal.timeout(22000)});
+const result=await response.json();if(!response.ok)throw new Error(JSON.stringify(result));
+const decision=decisionSchema.parse(result);const elapsed=Date.now()-start;
+if(elapsed>20000)throw new Error('Model exceeded acceptance deadline');
+const evidence={at:new Date().toISOString(),health,elapsedMs:elapsed,decision};
+writeFileSync('artifacts/model-probe.json',JSON.stringify(evidence,null,2));console.log(JSON.stringify(evidence,null,2));

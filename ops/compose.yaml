@@ -1,0 +1,57 @@
+name: kuru-workshop
+services:
+  app:
+    image: ${WORKSHOP_IMAGE:-kuru-workshop:local}
+    command: [node, --import, tsx, apps/server/src/api.ts]
+    env_file: ../.env
+    environment:
+      PORT: 8789
+      DB_PATH: /data/workshop.sqlite
+      RPC_INTERVAL_MS: 250
+    volumes: ["../data:/data"]
+    ports: ["127.0.0.1:8789:8789"]
+    networks: [private]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:uid=1000,gid=1000"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:8789/api/site/status').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+  worker:
+    image: ${WORKSHOP_IMAGE:-kuru-workshop:local}
+    command: [node, --import, tsx, apps/server/src/worker.ts]
+    env_file: ../.env
+    environment:
+      DB_PATH: /data/workshop.sqlite
+      KEYS_FILE: /run/secrets/worker.json
+      CODEX_RUNNER_URL: http://codex:8790
+      RPC_INTERVAL_MS: 110
+    volumes: ["../data:/data", "../secrets/worker.json:/run/secrets/worker.json:ro"]
+    networks: [private]
+    depends_on: [app, codex]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:uid=1000,gid=1000"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 45s
+  codex:
+    image: ${WORKSHOP_IMAGE:-kuru-workshop:local}
+    command: [node, --import, tsx, apps/server/src/codex-runner.ts]
+    environment:
+      CODEX_MODEL: ${CODEX_MODEL:-gpt-5.6-luna}
+    volumes:
+      - ../runtime/codex:/usr/local/bin/codex:ro
+      - ../secrets/codex:/home/runner/.codex
+    networks: [private]
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ["/tmp:uid=1000,gid=1000"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    cpus: 1.5
+networks:
+  private: {}

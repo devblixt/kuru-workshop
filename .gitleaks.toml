@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Three public Monad testnet ERC20 contract addresses; not API credentials"
+condition = "AND"
+paths = ['''^packages/shared/manifest\.ts$''']
+regexTarget = "secret"
+regexes = ['''(?i)^0x(ee1dce135a9ab598bca8cf3a28bdef6892100740|8b6c5fafef85b030bb1e71ae7ac085cc2380aaf8|ef2a20a161ac9ed1117d721336226b6399f15b4d)$''']

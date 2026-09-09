@@ -1,0 +1,13 @@
+import { z } from 'zod';
+export const profiles=['gold','balanced','crypto'] as const;
+export type Profile=typeof profiles[number];
+export const labels={gold:'Gold tilt',balanced:'Balanced',crypto:'Crypto tilt'};
+export const initialWeights={gold:[5000,1000,1000,3000],balanced:[4000,2000,2000,2000],crypto:[2000,3000,3000,2000]};
+const weights=z.tuple([z.number().int().min(0).max(5000),z.number().int().min(0).max(5000),z.number().int().min(0).max(5000),z.number().int().min(1000).max(10000)]).refine(a=>a.reduce((n,v)=>n+v,0)===10000,'Weights must sum to 10000');
+export const decisionSchema=z.object({baskets:z.array(z.object({profile:z.enum(profiles),weights,action:z.enum(['hold','rebalance']),explanation:z.string().min(1).max(500)}).strict()).length(3)}).strict().refine(d=>new Set(d.baskets.map(b=>b.profile)).size===3,'Exactly one decision per basket');
+export type Decision=z.infer<typeof decisionSchema>;
+export type MarketSnapshot={symbol:string,bid:string,ask:string,reference:string,bidValue:string,askValue:string,available:boolean};
+export type Snapshot={block:string,at:number,markets:MarketSnapshot[]};
+export type Trade={marketIndex:number,isBuy:boolean,amountIn:bigint,minAmountOut:bigint};
+export const stringify=(v:unknown)=>JSON.stringify(v,(_,x)=>typeof x==='bigint'?x.toString():x);
+export const asError=(e:unknown)=>e instanceof Error?e.message.split('\n')[0].slice(0,250):'Unexpected error';
